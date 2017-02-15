@@ -8,7 +8,10 @@ extern "C"
 #include <libavformat\avformat.h>
 #include <libavutil\imgutils.h>
 #include <libswscale\swscale.h>
+#include <SDL.h>
+#include <SDL_thread.h>
 }
+#undef main
 
 const char *videoPath = "Wildlife.wmv";
 
@@ -54,15 +57,6 @@ int main(int argc, char** argv)
     int width = pVideoDecoderContext->width;
     int height = pVideoDecoderContext->height;
     enum AVPixelFormat pixelFormat = pVideoDecoderContext->pix_fmt;
-    uint8_t *videoDstData[4] = { nullptr };
-    int videoDstLinesize[4];
-    int ret;
-    ret = av_image_alloc(videoDstData, videoDstLinesize, width, height, AV_PIX_FMT_RGB24, 1);
-    if (ret < 0)
-    {
-        OutputDebugString("Could not allocate raw video buffer\n");
-        return -1;
-    }
 
     av_dump_format(pFormatContext, 0, argv[1], 0);
 
@@ -84,14 +78,24 @@ int main(int argc, char** argv)
         pixelFormat,
         width,
         height,
-        AV_PIX_FMT_RGB24,
+        AV_PIX_FMT_YUV420P,
         SWS_BILINEAR,
         nullptr,
         nullptr,
         nullptr);
 
+    /// SDL
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER);
+    SDL_Surface *screen = SDL_SetVideoMode(width, height, 0, 0);
+    SDL_Overlay *bmp = SDL_CreateYUVOverlay(width, height, SDL_YV12_OVERLAY, screen);
+    SDL_Rect rect;
+    rect.x = 0;
+    rect.y = 0;
+    rect.w = width;
+    rect.h = height;
+    SDL_Event event;
+
     AVPacket packet;
-    int i = 0;
     while (av_read_frame(pFormatContext, &packet) >= 0)
     {
         if (packet.stream_index == videoStreamIndex)
@@ -105,25 +109,40 @@ int main(int argc, char** argv)
 
             if (gotFrame)
             {
+                SDL_LockYUVOverlay(bmp);
+
+                AVPicture pict;
+                pict.data[0] = bmp->pixels[0];
+                pict.data[1] = bmp->pixels[2];
+                pict.data[2] = bmp->pixels[1];
+
+                pict.linesize[0] = bmp->pitches[0];
+                pict.linesize[1] = bmp->pitches[2];
+                pict.linesize[2] = bmp->pitches[1];
                 // Convert the image from its native format to RGB
-                sws_scale(pSwsContext, (uint8_t const * const *)pFrame->data,
+                sws_scale(pSwsContext, pFrame->data,
                     pFrame->linesize,
                     0,
                     height,
-                    videoDstData,
-                    videoDstLinesize);
+                    pict.data,
+                    pict.linesize);
 
-                if (i < 10)
-                {
-                    std::cout << "Save frame: " << i << std::endl;
-                    SaveFrame(videoDstData, videoDstLinesize, width, height, i);
-                    i++;
-                }
-                else
-                {
-                    break;
-                }
+                SDL_UnlockYUVOverlay(bmp);
+                SDL_DisplayYUVOverlay(bmp, &rect);
             }
+        }
+
+        // Free the packet that was allocated by av_read_frame
+        av_free_packet(&packet);
+
+        SDL_PollEvent(&event);
+        switch (event.type) {
+        case SDL_QUIT:
+            SDL_Quit();
+            exit(0);
+            break;
+        default:
+            break;
         }
     }
 
@@ -131,7 +150,6 @@ int main(int argc, char** argv)
     avcodec_free_context(&pVideoDecoderContext);
     avformat_close_input(&pFormatContext);
     av_frame_free(&pFrame);
-    av_free(videoDstData[0]);
     system("pause");
     return 0;
 }
@@ -200,7 +218,7 @@ int OpenCodecContext(int * streamIndex,
     // Copy codec parameters from input stream to output codec context
     if ((ret = avcodec_parameters_to_context(*ppDecoderContext, pStream->codecpar)) < 0)
     {
-        std::string err = "Failed to copy " + std::string(av_get_media_type_string(type)) + 
+        std::string err = "Failed to copy " + std::string(av_get_media_type_string(type)) +
             " codec parameters to decoder context\n";
         OutputDebugString(err.c_str());
         return ret;
